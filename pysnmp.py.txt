@@ -1,0 +1,330 @@
+# -- coding: UTF-8 -
+'''
+Created on 2013-12-30
+@author: z00221146.
+@attention: This module is for SNMP Protocol lib, provide three interface.
+@version: version 1.0
+'''
+import os
+
+from pysnmp.smi import view
+from pysnmp.smi import builder
+from pysnmp.entity import config
+from pysnmp.entity import engine
+from pysnmp.proto.rfc1902 import ObjectName
+from pysnmp.entity.rfc3413 import ntfrcv
+from pysnmp.carrier.asynsock.dgram import udp
+from pysnmp.entity.rfc3413.oneliner import cmdgen
+
+#return code
+SNMP_RET_CODE_COMM_ERR = -1
+SNMP_RET_CODE_SUCC = 0
+'''
+SnmpV3 User Security
+UsmUserData(userName, 
+            authKey, 
+            privKey, 
+            authProtocol, 
+            privProtocol)
+'''
+userName = 'root'
+authKey  = 'Work@7*24'
+privKey  = 'Work@7*24'
+authProtocol = config.usmHMACSHAAuthProtocol
+privProtocol = config.usmAesCfb128Protocol
+
+SigmaUserDate  = cmdgen.UsmUserData(userName,\
+                                    authKey,\
+                                    privKey,\
+                                    authProtocol,\
+                                    privProtocol)
+'''
+SnmpV3 Udp TransportTarget
+UdpTransportTarget(transportAddr, timeout=1, retries=5, tagList=null)
+example
+UdpTransportTarget(('127.0.0.1', 161), 1, 2)
+'''
+UdpTransportTarget = cmdgen.UdpTransportTarget
+
+
+def snmp_get(transport, mibmanager, names, conditions={}, is_binary=False):
+    """
+    This method is for SnmpV3 GET option.
+    @param transport: instance of UdpTransportTarget.
+    @param mibmanager: instance of SnmpMibManager
+    @param param: dict include the name you want to get or Set.
+    @param conditions: dict include the key when you want to get or set a table variable
+    """
+    return_code = SNMP_RET_CODE_COMM_ERR
+    dict_pair = {}
+    ret_code = _verify_params(transport, mibmanager, names, conditions)
+    if ret_code == False:
+        return return_code, dict_pair
+        
+    cond = _parse_conditions(mibmanager, conditions)
+    '''pack the mib objects'''
+    mib_vars = []
+    for name in names:
+        mib_vars.append(mibmanager.get_mib_var(name, *cond))
+        
+    error_indication, error_status, error_index, var_binds = cmdgen.CommandGenerator().getCmd(SigmaUserDate,\
+                                                                       transport,\
+                                                                       *mib_vars)
+    '''Validate the return code'''
+    if error_indication:
+        mibmanager.get_logger().error("snmp_get:Receive SNMP rsp,but error:%s"%(str(error_indication)))
+        return return_code, dict_pair
+    if error_status:
+        mibmanager.get_logger().error("snmp_get: error rsp, %s at %s"\
+               %(error_status.prettyPrint(), error_index and var_binds[int(error_index)-1] or '?'))
+        return return_code, dict_pair
+    for oid, val in  var_binds:
+        label = mibmanager.get_label_by_oid(oid.prettyPrint())
+        if is_binary:
+            dict_pair[label] = ''.join([chr(x) for x in val.asNumbers()])
+        else:
+            dict_pair[label] = val.prettyPrint()
+    return_code = SNMP_RET_CODE_SUCC
+    return return_code, dict_pair
+
+def snmp_get_next(transport, mibmanager, names, conditions={}, is_binary=False):
+    """
+    This method is for SnmpV3 GET option.
+    @param transport: instance of UdpTransportTarget.
+    @param mibmanager: instance of SnmpMibManager
+    @param param: dict include the name you want to get or Set.
+    @param conditions: dict include the key when you want to get or set a table variable
+    @attention: See RFC1157 -->  4.1.3.1.  Example of Table Traversal
+    """
+    return_code = SNMP_RET_CODE_COMM_ERR
+    result_pair = []
+    ret_code = _verify_params(transport, mibmanager, names, conditions)
+    if ret_code == False:
+        return return_code, result_pair
+        
+    '''pack the mib objects'''
+    mib_vars = []
+    for name in names:
+        mib_vars.append(mibmanager.get_mib_var(name))
+    """    
+    error_indication, error_status, error_index, varBindTable  = cmdgen.CommandGenerator().bulkCmd(SigmaUserDate,\
+                                                                       transport,\
+                                                                       0,20,\
+                                                                       *mib_vars,\
+                                                                       lookupNames=False, lookupValues=False, \
+                                                                       lexicographicMode=False, ignoreNonIncreasingOid=False, maxRows=0)
+    """
+    error_indication, error_status, error_index, varBindTable  = cmdgen.CommandGenerator().nextCmd(SigmaUserDate,\
+                                                                       transport,\
+                                                                       *mib_vars,
+                                                                       lookupNames=False, lookupValues=False,\
+                                                                       lexicographicMode=False, ignoreNonIncreasingOid=False, maxRows=0)
+    
+    '''Validate the return code'''
+    if error_indication:
+        mibmanager.get_logger().error("snmp_get:Receive SNMP rsp,but error:%s"%(str(error_indication)))
+        return return_code, result_pair
+    if error_status:
+        mibmanager.get_logger().error("snmp_get: error rsp, %s at %s"\
+               %(error_status.prettyPrint(), error_index and varBindTable[-1][int(error_index)-1] or '?'))
+        return return_code, result_pair
+    result_pair = []
+    dict_pair = {}
+    for varBindTableRow in varBindTable:
+        dict_pair = {}
+        for oid, val in  varBindTableRow:
+            label = mibmanager.get_label_by_oid(oid.prettyPrint())
+            if is_binary:
+                dict_pair[label] = ''.join([chr(x) for x in val.asNumbers()])
+            else:
+                dict_pair[label] = val.prettyPrint()
+        result_pair.append(dict_pair)
+    return_code = SNMP_RET_CODE_SUCC
+    return return_code, result_pair
+
+def snmp_set(transport, mibmanager, names, conditions={}, is_binary=False):
+    """
+    This method is for SnmpV3 GET option.
+    @param transport: instance of UdpTransportTarget.
+    @param mibmanager: instance of SnmpMibManager
+    @param param: dict include the name you want to get or Set.
+    @param conditions: dict include the key when you want to get or set a table variable
+    """
+    return_code = SNMP_RET_CODE_COMM_ERR
+    dict_pair = {}
+    ret_code = _verify_params(transport, mibmanager, names, conditions)
+    if ret_code == False:
+        return return_code, dict_pair    
+    
+    cond = _parse_conditions(mibmanager, conditions)
+    '''pack the mib objects'''
+    mib_vars = []
+    for k, v in names.iteritems():
+        mib_vars.append((mibmanager.get_mib_var(k, *cond),v))
+        
+    error_indication, error_status, error_index, var_binds = cmdgen.CommandGenerator().setCmd(SigmaUserDate,\
+                                                                       transport,\
+                                                                       *mib_vars,
+                                                                       lookupNames=False, 
+                                                                       lookupValues=False)
+    '''Validate the return code'''
+    if error_indication:
+        mibmanager.get_logger().error("snmp_set:Receive SNMP rsp,but error:%s"%(str(error_indication)))
+        return return_code, dict_pair              
+    if error_status:
+        mibmanager.get_logger().error("snmp_set: error rsp, %s at %s"\
+               %(error_status.prettyPrint(), error_index and var_binds[int(error_index)-1] or '?'))
+        return return_code, dict_pair
+
+    for oid, val in  var_binds:
+        label = mibmanager.get_label_by_oid(oid.prettyPrint())
+        if is_binary:
+            dict_pair[label] = ''.join([chr(x) for x in val.asNumbers()])
+        else:
+            dict_pair[label] = val.prettyPrint()
+    return_code = SNMP_RET_CODE_SUCC
+
+    return return_code, dict_pair
+
+def _verify_params(transport, mibmanager, names, conditions):
+    """
+    this method is for verify params
+    """
+    if (not isinstance(transport, UdpTransportTarget)):
+        mibmanager.get_logger().error("snmp_get:param transport is invalid, not instance of UdpTransportTarget")
+        return False
+
+    if (not isinstance(mibmanager, SnmpMibManager)):
+        mibmanager.get_logger().error("snmp_get:param mibmanager is invalid, not instance of SnmpMibManager")
+        return False
+    
+    if (not isinstance(names, dict)) or (len(names) == 0):
+        mibmanager.get_logger().error("snmp_get:param names invalid, %s"%(str(names)))
+        return False
+    
+    if (not isinstance(conditions, dict)):
+        mibmanager.get_logger().error("snmp_get:param conditions invalid, %s"%(str(conditions)))
+        return False
+    
+    return True
+
+def _parse_conditions(mibmanager, conditions):
+    '''parse the query conditions'''
+    cond = []
+    index_tuple = []
+    try:
+        if conditions not in (None, {}):
+            for k,v in conditions.iteritems():
+                oid   = mibmanager.get_oid_by_label(k)
+                index = oid.split('.')[-1]
+                index_tuple.append((index, v))
+            index_tuple.sort(cmp=lambda x,y:cmp(x[0], y[0]))
+            for (index, value) in index_tuple:
+                cond.append(value)
+        else:
+            cond.append(0)
+    except:
+        mibmanager.get_logger().exception("_parse_conditions except, mib_name %s, conditions: %s"% str(mibmanager._mib_name), str(conditions))
+        cond = [0]
+    finally:
+        return cond
+
+def changeHexStringToBinary(mibmanager, HexString):
+    import struct
+    from ctypes import create_string_buffer
+    mibmanager.get_logger().info("receive an hex string: %s" % HexString)
+    if len(HexString) < 2:
+        return ""
+    #hex string must begin with 0x
+    head = HexString[0:2].lower()
+    if not head == "0x" :
+        return ""
+    info  = HexString[2:len(HexString)]
+    #an hex need two byte
+    hexLen = (len(info)/2)
+    binary = create_string_buffer(hexLen)
+    for i in range(0, hexLen):
+        h = info[(i*2):(i*2+2)]
+        v = int(h,16)
+        struct.pack_into("!B", binary, i, v)
+    mibmanager.get_logger().info("hex string change to binary: %s" % repr(binary.raw))
+    return binary
+
+class SnmpMibManager(object):
+    '''
+    Mib management wrapper class
+    Encapsulate some common interface, such as: transplate oid and name, verify the name and oid, etc.
+    '''
+    
+    #class variable
+    dirname = os.path.dirname
+    cur_dir = dirname(__file__)
+    MIBDIR = os.path.join(cur_dir, "mib")
+    
+    def __init__(self, mib_name, logger, mib_dir = None):
+        self._mib_name = mib_name
+        if mib_dir is None:
+            self._mib_dir  =  SnmpMibManager.MIBDIR
+        else:
+            self._mib_dir = mib_dir
+        self._mib_builder = builder.MibBuilder()
+        self._mib_builder.setMibPath(self._mib_dir)
+        self._logger = logger
+        try:
+            self._mib_builder.loadModules(self._mib_name)
+        except:
+            self._logger.exception("SnmpMibManager:__init__, load mib error, mib_name:%s"%(str(mib_name)))
+    
+    def get_logger(self):
+        """
+        get logger
+        """
+        return self._logger
+    
+    @classmethod
+    def get_mib_dir(cls):
+        '''
+        return mib_dir
+        '''
+        if os.path.exists(cls.MIBDIR):
+            return cls.MIBDIR
+        else:
+            return None
+        
+    def get_mib_var(self, sym_name, *condition):
+        '''
+        Translate the string format mib into mib object
+        '''
+        mib_var = cmdgen.MibVariable(self._mib_name, sym_name, *condition).addMibSource(self._mib_dir)
+        return mib_var
+    
+    def get_label_by_oid(self, oid):
+        '''
+        Get the label(literal name) by one specified oid, such as: 1.3.6.1.2.1.2.2.1.2.2-> "ifDescr"
+        '''
+        if not isinstance(oid, str):
+            return None
+        
+        try:
+            mib_view = view.MibViewController(self._mib_builder)
+            oid       = ObjectName(oid)
+            _,label,_ = mib_view.getNodeNameByOid(oid)
+            return label[-1]
+        except:
+            self._logger.exception("SnmpMibManager:get_label_by_oid, get label error, oid:%s"%(str(oid)))    
+            return None
+    
+    def get_oid_by_label(self, label):
+        if not isinstance(label, str):
+            return None
+        try:
+            mib_view = view.MibViewController(self._mib_builder)
+            oid, _, _ = mib_view.getNodeName((label,))
+            oid       = ObjectName(oid)
+            return str(oid)
+        except:
+            self._logger.exception("SnmpMibManager:get_oid_by_label, get oid error, label:%s"%(str(label)))    
+            return None
+
+
+
